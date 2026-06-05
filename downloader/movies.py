@@ -1,13 +1,17 @@
+import asyncio
 import os
 
 from config import MOVIES_PATH
 
+from downloader.tmdb import resolver_titulo_pelicula
 from downloader.tracker import tracker, Estado
 from downloader.utils import (
     convertir_a_mkv,
+    descargar_reanudable,
+    finalizar_part,
     nombre_pelicula_destino,
     obtener_extension,
-    progreso_callback
+    ruta_part
 )
 
 
@@ -16,17 +20,38 @@ async def descargar_pelicula(
     grupo_id,
     mensaje_id,
     nombre,
+    anio,
     bot,
     chat_id,
-    track_id=None
+    track_id=None,
+    titulo_personalizado=None
 ):
+    fallback = nombre_pelicula_destino(nombre)
+
+    if titulo_personalizado:
+        titulo = titulo_personalizado
+        desde_tmdb = titulo != fallback
+    else:
+        titulo, desde_tmdb = await resolver_titulo_pelicula(
+            nombre,
+            anio
+        )
+
     if track_id is None:
-        titulo = nombre_pelicula_destino(nombre)
         track_id = tracker.add(titulo, "pelicula")
     else:
-        titulo = nombre_pelicula_destino(nombre)
+        tracker.set_nombre(track_id, titulo)
+        tracker.set_estado(track_id, Estado.COLA)
+
+    tracker.registrar_task(
+        track_id,
+        asyncio.current_task()
+    )
 
     try:
+        if tracker.esta_cancelado(track_id):
+            return False
+
         msg = await telethon_client.get_messages(
             grupo_id,
             ids=mensaje_id
@@ -58,24 +83,26 @@ async def descargar_pelicula(
             carpeta,
             titulo + original_ext
         )
+        part_path = ruta_part(temp_path)
 
-        tracker.set_estado(track_id, Estado.DESCARGANDO, 0)
+        inicio = f"⬇ Descargando\n📁 {titulo}"
+        if desde_tmdb and titulo != fallback:
+            inicio += f"\n📝 Archivo: {fallback}"
+        elif not desde_tmdb:
+            inicio += "\n⚠️ TMDB no encontró metadatos, usando nombre original"
 
-        await bot.send_message(
+        await bot.send_message(chat_id, inicio)
+
+        await descargar_reanudable(
+            msg,
+            part_path,
+            track_id,
+            bot,
             chat_id,
-            f"⬇ Descargando\n{titulo}\n\n"
-            "Usa /downloads para ver el progreso"
+            titulo
         )
 
-        await msg.download_media(
-            file=temp_path,
-            progress_callback=progreso_callback(
-                bot,
-                chat_id,
-                titulo,
-                track_id
-            )
-        )
+        finalizar_part(part_path, temp_path)
 
         if original_ext.lower() == ".mkv":
             os.rename(temp_path, mkv_path)
@@ -107,6 +134,10 @@ async def descargar_pelicula(
         )
         return False
 
+    except asyncio.CancelledError:
+        tracker.marcar_cancelado(track_id)
+        return False
+
     except Exception as e:
         tracker.fallar(track_id, str(e))
         await bot.send_message(
@@ -114,3 +145,6 @@ async def descargar_pelicula(
             f"❌ Error descargando\n{titulo}\n\n{e}"
         )
         return False
+
+    finally:
+        tracker.registrar_task(track_id, None)

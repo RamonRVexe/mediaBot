@@ -1,9 +1,16 @@
 import asyncio
+import logging
 from functools import wraps
 
-from telegram import Update
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Update
+)
 from telegram.ext import (
     ApplicationBuilder,
+    ApplicationHandlerStop,
+    CallbackQueryHandler,
     CommandHandler,
     ConversationHandler,
     MessageHandler,
@@ -19,6 +26,8 @@ from config import (
     ADMIN_ID,
     TV_PATH,
     MOVIES_PATH,
+    MAX_DOWNLOAD_QUEUE,
+    tmdb_configurado,
     validar_config
 )
 
@@ -28,14 +37,23 @@ from downloader.series import (
 )
 
 from downloader.indexer import indexar_peliculas
-from downloader.movies import descargar_pelicula
-from downloader.utils import verificar_ffmpeg, nombre_pelicula_destino
+from downloader.queue import movie_queue, TrabajoPelicula
+from downloader.utils import (
+    verificar_ffmpeg,
+    nombre_pelicula_destino,
+    sanitizar_carpeta
+)
+from downloader.tmdb import (
+    resolver_titulo_serie,
+    resolver_titulo_pelicula
+)
 from downloader.tracker import tracker
 
 from database import (
     search_peliculas,
     list_peliculas,
     count_peliculas,
+    get_pelicula,
     init_db
 )
 
@@ -44,7 +62,7 @@ LIST_PAGE_SIZE = 30
 validar_config()
 init_db()
 
-GRUPO, SERIE, TEMP, INDEX = range(4)
+GRUPO, SERIE, CONFIRM_SERIE, TEMP, INDEX = range(5)
 
 telethon_client = TelegramClient(
     "user_session",
@@ -65,15 +83,215 @@ def autorizado(user_id):
 def solo_admin(handler):
     @wraps(handler)
     async def wrapper(update: Update, context):
-        if not autorizado(update.effective_user.id):
+        user = update.effective_user
+        if not user or not autorizado(user.id):
             return ConversationHandler.END
         return await handler(update, context)
     return wrapper
 
 
 async def post_init(application):
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s"
+    )
     await verificar_ffmpeg()
+    movie_queue.iniciar()
     print("✅ ffmpeg disponible")
+    if tmdb_configurado():
+        print("✅ TMDB configurado")
+    else:
+        print("⚠️ TMDB no configurado (TMDB_API_KEY o TMDB_READ_TOKEN)")
+
+
+def formatear_peliculas(resultados, titulo, pagina=None, total=None):
+    mensaje = titulo + "\n\n"
+
+    for i, r in enumerate(resultados):
+        _, nombre, grupo, anio, _, _ = r
+        anio_txt = f" ({anio})" if anio else ""
+        mensaje += (
+            f"{i}. 🎬 {nombre}{anio_txt}\n"
+            f"   📂 {grupo}\n\n"
+        )
+
+    if total is not None and pagina is not None:
+        paginas = max(1, (total + LIST_PAGE_SIZE - 1) // LIST_PAGE_SIZE)
+        mensaje += (
+            f"Mostrando {len(resultados)} de {total} "
+            f"(pág. {pagina}/{paginas})\n\n"
+        )
+    else:
+        mensaje += f"Total: {len(resultados)}\n\n"
+
+    mensaje += "Pulsa ⬇ en un botón para descargar."
+
+    return mensaje
+
+
+def teclado_peliculas(resultados, pagina=None, total=None):
+    botones = []
+    fila = []
+
+    for r in resultados:
+        pid, nombre, _, anio, _, _ = r
+        etiqueta = nombre[:28]
+        if anio:
+            etiqueta = f"{etiqueta[:22]} ({anio})"
+        fila.append(InlineKeyboardButton(
+            f"⬇ {etiqueta}",
+            callback_data=f"dl:{pid}"
+        ))
+        if len(fila) == 2:
+            botones.append(fila)
+            fila = []
+
+    if fila:
+        botones.append(fila)
+
+    nav = []
+    if pagina and pagina > 1:
+        nav.append(InlineKeyboardButton(
+            "◀️ Anterior",
+            callback_data=f"list:{pagina - 1}"
+        ))
+    if pagina and total:
+        paginas = max(1, (total + LIST_PAGE_SIZE - 1) // LIST_PAGE_SIZE)
+        if pagina < paginas:
+            nav.append(InlineKeyboardButton(
+                "Siguiente ▶️",
+                callback_data=f"list:{pagina + 1}"
+            ))
+    if nav:
+        botones.append(nav)
+
+    return InlineKeyboardMarkup(botones)
+
+
+def teclado_descargas(hay_activas):
+    if not hay_activas:
+        return None
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(
+            "🚫 Cancelar todas",
+            callback_data="cancel_dl"
+        )
+    ]])
+
+
+async def encolar_pelicula(
+    pelicula_id,
+    bot,
+    chat_id,
+    titulo_personalizado=None
+):
+    pelicula = get_pelicula(pelicula_id)
+
+    if not pelicula:
+        return False, "❌ Película no encontrada en el índice"
+
+    _, nombre, _, anio, grupo_id, mensaje_id = pelicula
+
+    if titulo_personalizado:
+        titulo = titulo_personalizado
+    else:
+        titulo = nombre_pelicula_destino(nombre)
+
+    track_id = tracker.add(titulo, "pelicula")
+
+    await iniciar_telethon()
+
+    trabajo = TrabajoPelicula(
+        telethon_client=telethon_client,
+        grupo_id=grupo_id,
+        mensaje_id=mensaje_id,
+        nombre=nombre,
+        anio=anio,
+        bot=bot,
+        chat_id=chat_id,
+        track_id=track_id,
+        titulo_personalizado=titulo_personalizado
+    )
+
+    return await movie_queue.encolar(trabajo)
+
+
+async def iniciar_descarga_pelicula(
+    pelicula_id,
+    bot,
+    chat_id,
+    context
+):
+    pelicula = get_pelicula(pelicula_id)
+
+    if not pelicula:
+        return False, "❌ Película no encontrada en el índice"
+
+    _, nombre, _, anio, _, _ = pelicula
+
+    if tmdb_configurado():
+        titulo, desde_tmdb = await resolver_titulo_pelicula(
+            nombre,
+            anio
+        )
+
+        if not desde_tmdb:
+            context.user_data["pendiente_pelicula"] = {
+                "pelicula_id": pelicula_id,
+                "sugerido": titulo,
+            }
+            return False, (
+                "⚠️ TMDB no encontró metadatos.\n\n"
+                f"Sugerido: {titulo}\n\n"
+                "Escribe el nombre de la carpeta:\n"
+                "`ok` = usar el sugerido"
+            )
+
+        return await encolar_pelicula(
+            pelicula_id,
+            bot,
+            chat_id,
+            titulo_personalizado=titulo
+        )
+
+    return await encolar_pelicula(pelicula_id, bot, chat_id)
+
+
+async def continuar_temporadas(update, context):
+    grupo = context.user_data["grupo"]
+    titulo = context.user_data["serie"]
+
+    temps = await obtener_temporadas(telethon_client, grupo)
+
+    if not temps:
+        await update.message.reply_text(
+            "❌ No encontré episodios en ese grupo."
+        )
+        return ConversationHandler.END
+
+    context.user_data["temps"] = temps
+
+    texto = (
+        f"📺 Serie: {titulo}\n\n"
+        "Temporadas encontradas\n\n"
+    )
+
+    for t in temps:
+        texto += f"{t}. Season {t:02d}\n"
+
+    texto += """
+
+A = Todas
+
+E:1,2
+Excluir temporadas
+
+1,3
+Sólo descargar esas
+"""
+
+    await update.message.reply_text(texto)
+    return TEMP
 
 
 async def start(update: Update, context):
@@ -89,17 +307,21 @@ Series (1 grupo = 1 serie):
 
 Películas (grupos con muchas pelis):
 /index_movies — Indexar grupo de películas
-/list — Ver películas indexadas
-/list 2 — Página 2 de la lista
+/list — Ver películas indexadas (con botones)
 /search nombre — Buscar película indexada
-/download N — Descargar resultado #N
+/download N — Descargar por número (alternativo)
+
+Descargas:
 /downloads — Ver cola y progreso
+/cancel_download — Cancelar descargas activas
+/cancel_download ID — Cancelar una descarga
+/cancel_download serie Nombre — Cancelar serie
 
 Utilidades:
 /status — Estado del bot
 /groups — Listar chats
 /paths — Rutas de medios
-/cancel — Cancelar operación
+/cancel — Cancelar conversación
 
 Primera vez: ejecuta login.py para la sesión Telethon.
 """
@@ -122,6 +344,8 @@ TV:
 
 Movies:
 {MOVIES_PATH}
+
+Cola máxima: {MAX_DOWNLOAD_QUEUE} películas
 """
     )
 
@@ -177,7 +401,8 @@ async def set_group(update: Update, context):
 
         await update.message.reply_text(
             f"Grupo: {grupo.name}\n\n"
-            "📝 Escribe el nombre de la carpeta de la serie:"
+            "📝 Escribe el nombre de la serie.\n"
+            "TMDB renombrará la carpeta si está configurado."
         )
 
         return SERIE
@@ -189,41 +414,65 @@ async def set_group(update: Update, context):
 
 @solo_admin
 async def set_serie(update: Update, context):
-    nombre = update.message.text.strip()
+    nombre_escrito = update.message.text.strip()
     grupo = context.user_data["grupo"]
 
-    context.user_data["serie"] = nombre
+    context.user_data["nombre_escrito"] = nombre_escrito
 
-    await update.message.reply_text("🔍 Buscando temporadas en el grupo...")
-
-    temps = await obtener_temporadas(telethon_client, grupo)
-
-    if not temps:
+    if not tmdb_configurado():
+        context.user_data["serie"] = sanitizar_carpeta(nombre_escrito)
         await update.message.reply_text(
-            "❌ No encontré episodios en ese grupo."
+            f"📺 Carpeta: {context.user_data['serie']}\n\n"
+            "🔍 Buscando temporadas..."
         )
-        return ConversationHandler.END
+        return await continuar_temporadas(update, context)
 
-    context.user_data["temps"] = temps
+    titulo, desde_tmdb = await resolver_titulo_serie(
+        nombre_escrito,
+        alternativo=grupo.name
+    )
+    context.user_data["serie_sugerida"] = titulo
 
-    texto = "📺 Temporadas encontradas\n\n"
+    if desde_tmdb:
+        aviso = (
+            f"📺 TMDB sugiere:\n{titulo}\n\n"
+            "Escribe otro nombre para cambiarlo,\n"
+            "o envía `ok` para usar este."
+        )
+    else:
+        aviso = (
+            "⚠️ TMDB no encontró metadatos.\n\n"
+            "Escribe el nombre de la carpeta:\n"
+            f"`ok` = usar sugerido ({titulo})"
+        )
 
-    for t in temps:
-        texto += f"{t}. Season {t:02d}\n"
+    await update.message.reply_text(aviso)
+    return CONFIRM_SERIE
 
-    texto += """
 
-A = Todas
+@solo_admin
+async def confirm_serie(update: Update, context):
+    texto = update.message.text.strip()
+    sugerida = context.user_data.get("serie_sugerida", "")
 
-E:1,2
-Excluir temporadas
+    if texto.lower() in ("ok", "si", "sí", "yes"):
+        titulo = sugerida
+    else:
+        titulo = sanitizar_carpeta(texto)
 
-1,3
-Sólo descargar esas
-"""
+    if not titulo:
+        await update.message.reply_text(
+            "❌ Nombre inválido. Escribe otro o `ok`."
+        )
+        return CONFIRM_SERIE
 
-    await update.message.reply_text(texto)
-    return TEMP
+    context.user_data["serie"] = titulo
+
+    await update.message.reply_text(
+        f"📺 Carpeta: {titulo}\n\n🔍 Buscando temporadas..."
+    )
+
+    return await continuar_temporadas(update, context)
 
 
 @solo_admin
@@ -259,16 +508,19 @@ async def set_temp(update: Update, context):
             )
             return TEMP
 
+        nombre_serie = context.user_data["serie"]
+
         await update.message.reply_text(
             "🚀 Iniciando descarga...\n\n"
-            "Usa /downloads para ver el progreso"
+            "Usa /downloads para ver el progreso\n"
+            f"/cancel_download serie {nombre_serie} — cancelar"
         )
 
         asyncio.create_task(
             descargar_serie(
                 telethon_client,
                 context.user_data["grupo"],
-                context.user_data["serie"],
+                nombre_serie,
                 seleccion,
                 context.bot,
                 update.effective_chat.id
@@ -342,37 +594,45 @@ async def set_index_group(update: Update, context):
         return INDEX
 
 
-def formatear_peliculas(resultados, titulo, pagina=None, total=None):
-    mensaje = titulo + "\n\n"
+async def mostrar_lista(
+    bot,
+    chat_id,
+    pagina,
+    editar=None
+):
+    total = count_peliculas()
+    paginas = max(1, (total + LIST_PAGE_SIZE - 1) // LIST_PAGE_SIZE)
 
-    for i, r in enumerate(resultados):
-        _, nombre, grupo, anio, _, _ = r
-        anio_txt = f" ({anio})" if anio else ""
-        mensaje += (
-            f"{i}. 🎬 {nombre}{anio_txt}\n"
-            f"   📂 {grupo}\n\n"
-        )
+    if pagina < 1 or pagina > paginas:
+        return False, f"❌ Página inválida (1-{paginas})"
 
-    if total is not None and pagina is not None:
-        paginas = max(1, (total + LIST_PAGE_SIZE - 1) // LIST_PAGE_SIZE)
-        mensaje += (
-            f"Mostrando {len(resultados)} de {total} "
-            f"(pág. {pagina}/{paginas})\n\n"
+    resultados = list_peliculas(pagina, LIST_PAGE_SIZE)
+
+    mensaje = formatear_peliculas(
+        resultados,
+        "📋 Películas indexadas",
+        pagina=pagina,
+        total=total
+    )
+    teclado = teclado_peliculas(
+        resultados,
+        pagina=pagina,
+        total=total
+    )
+
+    if editar:
+        await editar.edit_text(
+            mensaje[:4000],
+            reply_markup=teclado
         )
     else:
-        mensaje += f"Total: {len(resultados)}\n\n"
+        await bot.send_message(
+            chat_id,
+            mensaje[:4000],
+            reply_markup=teclado
+        )
 
-    mensaje += "Descarga con:\n/download N"
-
-    if pagina and pagina > 1:
-        mensaje += f"\n\nPágina anterior:\n/list {pagina - 1}"
-
-    if total and pagina:
-        paginas = max(1, (total + LIST_PAGE_SIZE - 1) // LIST_PAGE_SIZE)
-        if pagina < paginas:
-            mensaje += f"\nSiguiente página:\n/list {pagina + 1}"
-
-    return mensaje
+    return True, None
 
 
 @solo_admin
@@ -388,10 +648,6 @@ async def list_movies(update: Update, context):
             )
             return
 
-        if pagina < 1:
-            await update.message.reply_text("❌ La página debe ser ≥ 1")
-            return
-
     total = count_peliculas()
 
     if total == 0:
@@ -401,26 +657,14 @@ async def list_movies(update: Update, context):
         )
         return
 
-    paginas = max(1, (total + LIST_PAGE_SIZE - 1) // LIST_PAGE_SIZE)
-
-    if pagina > paginas:
-        await update.message.reply_text(
-            f"❌ Solo hay {paginas} página(s).\n"
-            f"Usa /list {paginas}"
-        )
-        return
-
-    resultados = list_peliculas(pagina, LIST_PAGE_SIZE)
-    context.user_data["busqueda"] = resultados
-
-    mensaje = formatear_peliculas(
-        resultados,
-        "📋 Películas indexadas",
-        pagina=pagina,
-        total=total
+    ok, error = await mostrar_lista(
+        context.bot,
+        update.effective_chat.id,
+        pagina
     )
 
-    await update.message.reply_text(mensaje[:4000])
+    if not ok:
+        await update.message.reply_text(error)
 
 
 @solo_admin
@@ -449,13 +693,67 @@ async def search(update: Update, context):
         resultados,
         f"🔍 Películas: {texto}"
     )
+    teclado = teclado_peliculas(resultados)
 
-    await update.message.reply_text(mensaje[:4000])
+    await update.message.reply_text(
+        mensaje[:4000],
+        reply_markup=teclado
+    )
 
 
 @solo_admin
 async def downloads(update: Update, context):
-    await update.message.reply_text(tracker.formatear())
+    texto, hay_activas = tracker.formatear()
+    teclado = teclado_descargas(hay_activas)
+    await update.message.reply_text(
+        texto,
+        reply_markup=teclado
+    )
+
+
+@solo_admin
+async def cancel_download(update: Update, context):
+    args = context.args
+
+    if not args:
+        n = tracker.cancelar_activas()
+        await update.message.reply_text(
+            f"🚫 {n} descarga(s) cancelada(s)"
+        )
+        return
+
+    if args[0].lower() == "serie":
+        lote = " ".join(args[1:]).strip()
+        if not lote:
+            await update.message.reply_text(
+                "Uso:\n/cancel_download serie Nombre Serie"
+            )
+            return
+        n = tracker.cancelar_lote(lote)
+        await update.message.reply_text(
+            f"🚫 Serie cancelada: {lote}\n"
+            f"{n} elemento(s) en cola"
+        )
+        return
+
+    try:
+        track_id = int(args[0])
+    except ValueError:
+        await update.message.reply_text(
+            "Uso:\n/cancel_download\n"
+            "/cancel_download ID\n"
+            "/cancel_download serie Nombre"
+        )
+        return
+
+    if tracker.cancelar(track_id):
+        await update.message.reply_text(
+            f"🚫 Descarga #{track_id} cancelada"
+        )
+    else:
+        await update.message.reply_text(
+            f"❌ No se pudo cancelar #{track_id}"
+        )
 
 
 @solo_admin
@@ -463,7 +761,7 @@ async def download(update: Update, context):
     if not context.args:
         await update.message.reply_text(
             "Uso:\n/download N\n\n"
-            "Primero usa /list o /search"
+            "O usa los botones en /list y /search"
         )
         return
 
@@ -490,33 +788,101 @@ async def download(update: Update, context):
         return
 
     pelicula = resultados[idx]
-    _, nombre, _, _, grupo_id, mensaje_id = pelicula
+    pelicula_id = pelicula[0]
 
-    titulo = nombre_pelicula_destino(nombre)
-    track_id = tracker.add(titulo, "pelicula")
+    ok, msg = await iniciar_descarga_pelicula(
+        pelicula_id,
+        context.bot,
+        update.effective_chat.id,
+        context
+    )
 
-    await iniciar_telethon()
+    await update.message.reply_text(msg)
 
-    asyncio.create_task(
-        descargar_pelicula(
-            telethon_client,
-            grupo_id,
-            mensaje_id,
-            nombre,
+
+async def callback_query(update: Update, context):
+    query = update.callback_query
+
+    if not query.from_user or not autorizado(query.from_user.id):
+        await query.answer("No autorizado", show_alert=True)
+        return
+
+    data = query.data
+
+    if data.startswith("dl:"):
+        pelicula_id = int(data[3:])
+        ok, msg = await iniciar_descarga_pelicula(
+            pelicula_id,
             context.bot,
-            update.effective_chat.id,
-            track_id=track_id
+            query.message.chat_id,
+            context
         )
+        await query.answer("Encolada" if ok else "Nombre requerido")
+        await query.message.reply_text(msg)
+        return
+
+    if data.startswith("list:"):
+        pagina = int(data[5:])
+        await query.answer()
+        ok, error = await mostrar_lista(
+            context.bot,
+            query.message.chat_id,
+            pagina,
+            editar=query.message
+        )
+        if not ok:
+            await query.message.reply_text(error)
+        return
+
+    if data == "cancel_dl":
+        n = tracker.cancelar_activas()
+        await query.answer("Canceladas")
+        await query.message.reply_text(
+            f"🚫 {n} descarga(s) cancelada(s)"
+        )
+        return
+
+    await query.answer()
+
+
+async def recibir_nombre_pelicula(update: Update, context):
+    if not update.effective_user or not autorizado(update.effective_user.id):
+        return
+
+    pendiente = context.user_data.get("pendiente_pelicula")
+    if not pendiente:
+        return
+
+    texto = update.message.text.strip()
+    sugerido = pendiente.get("sugerido", "")
+
+    if texto.lower() in ("ok", "si", "sí", "yes"):
+        titulo = sugerido
+    else:
+        titulo = sanitizar_carpeta(texto)
+
+    if not titulo:
+        await update.message.reply_text(
+            "❌ Nombre inválido. Escribe otro o `ok`."
+        )
+        raise ApplicationHandlerStop
+
+    context.user_data.pop("pendiente_pelicula", None)
+
+    ok, msg = await encolar_pelicula(
+        pendiente["pelicula_id"],
+        context.bot,
+        update.effective_chat.id,
+        titulo_personalizado=titulo
     )
 
-    await update.message.reply_text(
-        f"📥 En cola: {titulo}\n\n"
-        "Usa /downloads para ver el progreso"
-    )
+    await update.message.reply_text(msg)
+    raise ApplicationHandlerStop
 
 
 @solo_admin
 async def cancel(update: Update, context):
+    context.user_data.pop("pendiente_pelicula", None)
     await update.message.reply_text("❌ Cancelado")
     return ConversationHandler.END
 
@@ -540,6 +906,12 @@ app.add_handler(CommandHandler("list", list_movies))
 app.add_handler(CommandHandler("search", search))
 app.add_handler(CommandHandler("download", download))
 app.add_handler(CommandHandler("downloads", downloads))
+app.add_handler(CommandHandler("cancel_download", cancel_download))
+app.add_handler(CallbackQueryHandler(callback_query))
+app.add_handler(MessageHandler(
+    filters.TEXT & ~filters.COMMAND,
+    recibir_nombre_pelicula
+))
 
 series_conv = ConversationHandler(
     entry_points=[
@@ -556,6 +928,12 @@ series_conv = ConversationHandler(
             MessageHandler(
                 filters.TEXT & ~filters.COMMAND,
                 set_serie
+            )
+        ],
+        CONFIRM_SERIE: [
+            MessageHandler(
+                filters.TEXT & ~filters.COMMAND,
+                confirm_serie
             )
         ],
         TEMP: [

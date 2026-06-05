@@ -8,9 +8,13 @@ Bot de Telegram para descargar series y películas desde grupos/canales usando t
 |---------|-------------|
 | **Series** | Descarga episodios de un grupo dedicado (1 grupo = 1 serie), detecta temporadas automáticamente y guarda en `TV Shows/Nombre/Season 01/` |
 | **Películas** | Indexa grupos con muchas películas en SQLite, permite buscar/listar y descargar por nombre |
-| **Organización** | Renombra episodios (`Serie - S01E01.mkv`) y películas (`Película/Película.mkv`) |
+| **Organización** | Renombra episodios (`Serie - S01E01.mkv`) y películas (`Película (Año)/Película (Año).mkv`) |
+| **TMDB** | Renombra películas y series con título y año correctos usando The Movie Database (opcional) |
 | **Conversión** | Remux a MKV con ffmpeg (sin re-codificar, copia directa de streams) |
-| **Progreso** | Cola de descargas con barras de progreso consultables en cualquier momento |
+| **Progreso** | Cola de descargas con barras de progreso y botones inline |
+| **Reanudación** | Si se corta una descarga, retoma desde el archivo `.part` |
+| **Cancelación** | Cancela descargas activas, individuales o series completas |
+| **Cola limitada** | Evita saturar Telegram con demasiadas descargas simultáneas |
 | **Seguridad** | Solo responde al `ADMIN_ID` configurado |
 
 ## Requisitos
@@ -81,6 +85,9 @@ cp .env.example .env
 | `ADMIN_ID` | Tu ID numérico de Telegram (usa [@userinfobot](https://t.me/userinfobot)) |
 | `TV_PATH` | Ruta donde guardar series |
 | `MOVIES_PATH` | Ruta donde guardar películas |
+| `TMDB_API_KEY` | *(Opcional)* API key de [TMDB](https://www.themoviedb.org/settings/api) para renombrar películas y series |
+| `MAX_DOWNLOAD_QUEUE` | Máximo de películas en cola (default: `50`) |
+| `MAX_CONCURRENT_DOWNLOADS` | Descargas de películas en paralelo (default: `1`) |
 
 **Ejemplo Windows:**
 ```env
@@ -143,21 +150,30 @@ Para grupos con muchas películas mezcladas:
 
 ```
 /index_movies     → indexar un grupo (solo películas, ignora episodios)
-/list             → ver películas indexadas (página 1)
+/list             → ver películas indexadas con botones ⬇
 /list 2           → página 2
-/search matrix    → buscar por palabras
-/download 0       → descargar el resultado #0
+/search matrix    → buscar con botones de descarga
+/download 0       → descargar por número (alternativo a botones)
 ```
+
+En `/list` y `/search` cada película tiene un botón **⬇** para encolarla al instante.
 
 ### Descargas y utilidades
 
 ```
-/downloads        → cola activa + progreso + recientes
-/status           → estado del bot
-/groups           → listar tus chats/grupos
-/paths            → rutas configuradas
-/cancel           → cancelar conversación activa
+/downloads                  → cola activa + progreso + recientes
+/cancel_download            → cancelar todas las descargas activas
+/cancel_download 5          → cancelar la descarga #5
+/cancel_download serie Nombre → cancelar descarga de una serie
+/status                     → estado del bot
+/groups                     → listar tus chats/grupos
+/paths                      → rutas configuradas
+/cancel                     → cancelar conversación activa
 ```
+
+### Reanudar descargas interrumpidas
+
+Si una descarga se corta (error, cancelación, reinicio), el archivo parcial queda como `.part`. Al volver a descargar la misma película o episodio, Telethon retoma desde donde se quedó.
 
 ## Estructura de archivos descargados
 
@@ -198,7 +214,9 @@ mediaBot/
 │   ├── movies.py          # Descarga de películas
 │   ├── indexer.py         # Indexado de grupos de películas
 │   ├── tracker.py         # Cola y progreso de descargas
-│   └── utils.py           # ffmpeg, progreso, utilidades
+│   ├── queue.py           # Cola limitada de películas
+│   ├── tmdb.py            # Metadatos TMDB para renombrar
+│   └── utils.py           # ffmpeg, progreso, reanudación
 ├── requirements.txt
 ├── .env.example
 └── .gitignore

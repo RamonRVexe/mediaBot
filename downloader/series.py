@@ -7,9 +7,11 @@ from config import TV_PATH
 from downloader.tracker import tracker, Estado
 from downloader.utils import (
     convertir_a_mkv,
+    descargar_reanudable,
+    finalizar_part,
     limpiar_nombre,
     obtener_extension,
-    progreso_callback
+    ruta_part
 )
 
 PATTERNS = {
@@ -144,7 +146,6 @@ async def descargar_serie(
             "msg": msg,
             "filename": filename,
             "folder": folder,
-            "original": original,
             "original_ext": obtener_extension(original),
         })
 
@@ -169,61 +170,98 @@ async def descargar_serie(
         chat_id,
         f"🚀 {len(cola)} episodios en cola\n"
         f"Serie: {nombre_serie}\n\n"
-        "Usa /downloads para ver el progreso"
+        "Usa /downloads para ver el progreso\n"
+        f"/cancel_download serie {nombre_serie} — cancelar"
+    )
+
+    tracker.registrar_serie_task(
+        nombre_serie,
+        asyncio.current_task()
     )
 
     descargados = 0
+    cancelados = 0
 
-    for item, track_id in zip(cola, track_ids):
-        msg = item["msg"]
-        filename = item["filename"]
-        folder = item["folder"]
-        original_ext = item["original_ext"]
+    try:
+        for item, track_id in zip(cola, track_ids):
+            if tracker.lote_cancelado(nombre_serie):
+                tracker.cancelar(track_id)
+                cancelados += 1
+                continue
 
-        os.makedirs(folder, exist_ok=True)
+            if tracker.esta_cancelado(track_id):
+                cancelados += 1
+                continue
 
-        mkv_path = os.path.join(folder, filename + ".mkv")
-        temp_path = os.path.join(
-            folder,
-            filename + original_ext
-        )
+            msg = item["msg"]
+            filename = item["filename"]
+            folder = item["folder"]
+            original_ext = item["original_ext"]
 
-        tracker.set_estado(track_id, Estado.DESCARGANDO, 0)
+            os.makedirs(folder, exist_ok=True)
 
-        await msg.download_media(
-            file=temp_path,
-            progress_callback=progreso_callback(
-                bot,
-                chat_id,
-                filename,
-                track_id
+            mkv_path = os.path.join(folder, filename + ".mkv")
+            temp_path = os.path.join(
+                folder,
+                filename + original_ext
             )
-        )
+            part_path = ruta_part(temp_path)
 
-        if original_ext.lower() == ".mkv":
-            os.rename(temp_path, mkv_path)
-            tracker.completar(track_id)
-            descargados += 1
+            tracker.registrar_task(
+                track_id,
+                asyncio.current_task()
+            )
+
+            try:
+                await descargar_reanudable(
+                    msg,
+                    part_path,
+                    track_id,
+                    bot,
+                    chat_id,
+                    filename
+                )
+
+                finalizar_part(part_path, temp_path)
+
+                if original_ext.lower() == ".mkv":
+                    os.rename(temp_path, mkv_path)
+                    tracker.completar(track_id)
+                    descargados += 1
+                    await asyncio.sleep(0.2)
+                    continue
+
+                ok, error = await convertir_a_mkv(
+                    temp_path,
+                    mkv_path,
+                    track_id
+                )
+
+                if ok:
+                    tracker.completar(track_id)
+                    descargados += 1
+                else:
+                    tracker.fallar(track_id, "error ffmpeg")
+                    await bot.send_message(
+                        chat_id,
+                        f"❌ Error convirtiendo\n{filename}\n\n{error[:500]}"
+                    )
+
+            except asyncio.CancelledError:
+                tracker.marcar_cancelado(track_id)
+                cancelados += 1
+                break
+
             await asyncio.sleep(0.2)
-            continue
 
-        ok, error = await convertir_a_mkv(
-            temp_path,
-            mkv_path,
-            track_id
-        )
+    except asyncio.CancelledError:
+        for track_id in track_ids:
+            if not tracker.esta_cancelado(track_id):
+                tracker.cancelar(track_id)
+                cancelados += 1
 
-        if ok:
-            tracker.completar(track_id)
-            descargados += 1
-        else:
-            tracker.fallar(track_id, "error ffmpeg")
-            await bot.send_message(
-                chat_id,
-                f"❌ Error convirtiendo\n{filename}\n\n{error[:500]}"
-            )
-
-        await asyncio.sleep(0.2)
+    finally:
+        tracker.registrar_serie_task(nombre_serie, None)
 
     await bot.send_message(
         chat_id,
@@ -241,5 +279,6 @@ Patrones encontrados:
 
 Episodios descargados:
 {descargados} de {len(cola)}
+Cancelados: {cancelados}
 """
     )

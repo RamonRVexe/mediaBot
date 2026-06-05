@@ -13,6 +13,8 @@ VIDEO_EXT = re.compile(
 
 ANIO_RE = re.compile(r"\((\d{4})\)|\b(19\d{2}|20\d{2})\b")
 
+INVALIDOS_WIN = re.compile(r'[<>:"/\\|?*]')
+
 
 def limpiar_nombre(nombre):
     if not nombre:
@@ -25,6 +27,12 @@ def limpiar_nombre(nombre):
         flags=re.UNICODE
     )
     return nombre
+
+
+def sanitizar_carpeta(nombre):
+    nombre = INVALIDOS_WIN.sub("", nombre or "")
+    nombre = nombre.strip(" .")
+    return nombre[:200] or "pelicula"
 
 
 def es_video(nombre):
@@ -57,7 +65,26 @@ def nombre_pelicula_destino(nombre):
         base,
         flags=re.I
     )
-    return base.strip() or "pelicula"
+    return sanitizar_carpeta(base.strip() or "pelicula")
+
+
+def ruta_part(ruta_base):
+    return ruta_base + ".part"
+
+
+def bytes_parciales(ruta_part):
+    if os.path.exists(ruta_part):
+        return os.path.getsize(ruta_part)
+    return 0
+
+
+def finalizar_part(ruta_part, ruta_final):
+    if not os.path.exists(ruta_part):
+        return
+    if os.path.exists(ruta_final):
+        os.remove(ruta_part)
+        return
+    os.rename(ruta_part, ruta_final)
 
 
 async def verificar_ffmpeg():
@@ -96,6 +123,8 @@ def progreso_callback(bot, chat_id, nombre, track_id=None):
             pass
 
     def callback(actual, total):
+        if track_id is not None and tracker.esta_cancelado(track_id):
+            raise asyncio.CancelledError("cancelado por usuario")
         if not total:
             return
         try:
@@ -105,14 +134,46 @@ def progreso_callback(bot, chat_id, nombre, track_id=None):
             if porcentaje >= estado["valor"] + 10:
                 estado["valor"] = porcentaje
                 asyncio.create_task(actualizar(porcentaje))
+        except asyncio.CancelledError:
+            raise
         except Exception:
             pass
 
     return callback
 
 
+async def descargar_reanudable(
+    msg,
+    ruta_part,
+    track_id,
+    bot,
+    chat_id,
+    titulo
+):
+    if tracker.esta_cancelado(track_id):
+        raise asyncio.CancelledError()
+
+    parcial = bytes_parciales(ruta_part)
+    if parcial > 0:
+        tracker.set_estado(track_id, Estado.DESCARGANDO)
+    else:
+        tracker.set_estado(track_id, Estado.DESCARGANDO, 0)
+
+    await msg.download_media(
+        file=ruta_part,
+        progress_callback=progreso_callback(
+            bot,
+            chat_id,
+            titulo,
+            track_id
+        )
+    )
+
+
 async def convertir_a_mkv(origen, destino, track_id=None):
     if track_id is not None:
+        if tracker.esta_cancelado(track_id):
+            raise asyncio.CancelledError()
         tracker.set_estado(track_id, Estado.CONVIRTIENDO)
 
     proceso = await asyncio.create_subprocess_exec(
@@ -130,6 +191,9 @@ async def convertir_a_mkv(origen, destino, track_id=None):
     )
 
     _, error = await proceso.communicate()
+
+    if track_id is not None and tracker.esta_cancelado(track_id):
+        raise asyncio.CancelledError()
 
     if proceso.returncode == 0:
         try:
