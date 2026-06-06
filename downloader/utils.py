@@ -181,19 +181,36 @@ async def convertir_a_mkv(origen, destino, track_id=None):
             Estado.CONVIRTIENDO
         )
 
+async def convertir_a_mkv(origen, destino, track_id=None):
+
+    if track_id is not None:
+        if tracker.esta_cancelado(track_id):
+            raise asyncio.CancelledError()
+
+        tracker.set_estado(
+            track_id,
+            Estado.CONVIRTIENDO
+        )
+
+    # =====================================
+    # INTENTO 1
+    # Video + Audio + Subtítulos
+    # =====================================
+
     proceso = await asyncio.create_subprocess_exec(
         "ffmpeg",
-        "-i",
-        origen,
+        "-i", origen,
 
         "-map", "0:v",
         "-map", "0:a?",
-        
+        "-map", "0:s?",
+
         "-c:v", "copy",
         "-c:a", "copy",
+        "-c:s", "copy",
 
-        destino,
         "-y",
+        destino,
 
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE
@@ -216,6 +233,53 @@ async def convertir_a_mkv(origen, destino, track_id=None):
 
         return True, ""
 
-    return False, error.decode(
-        errors="ignore"
+    # =====================================
+    # INTENTO 2
+    # Solo Video + Audio
+    # =====================================
+
+    try:
+        if os.path.exists(destino):
+            os.remove(destino)
+    except OSError:
+        pass
+
+    proceso = await asyncio.create_subprocess_exec(
+        "ffmpeg",
+        "-i", origen,
+
+        "-map", "0:v",
+        "-map", "0:a?",
+
+        "-c:v", "copy",
+        "-c:a", "copy",
+
+        "-y",
+        destino,
+
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE
+    )
+
+    _, error2 = await proceso.communicate()
+
+    if (
+        track_id is not None and
+        tracker.esta_cancelado(track_id)
+    ):
+        raise asyncio.CancelledError()
+
+    if proceso.returncode == 0:
+
+        try:
+            os.remove(origen)
+        except OSError:
+            pass
+
+        return True, ""
+
+    return False, (
+        error.decode(errors="ignore")
+        + "\n\n----- FALLBACK -----\n\n"
+        + error2.decode(errors="ignore")
     )
