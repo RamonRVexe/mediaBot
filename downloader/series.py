@@ -244,7 +244,7 @@ async def descargar_serie(
                     tracker.fallar(track_id, "error ffmpeg")
                     await bot.send_message(
                         chat_id,
-                        f"❌ Error convirtiendo\n{filename}\n\n{error[:500]}"
+                       f"❌ Error convirtiendo\n{filename}\n\n{error[-3000:]}"
                     )
 
             except asyncio.CancelledError:

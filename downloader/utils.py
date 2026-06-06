@@ -171,35 +171,51 @@ async def descargar_reanudable(
 
 
 async def convertir_a_mkv(origen, destino, track_id=None):
+
     if track_id is not None:
         if tracker.esta_cancelado(track_id):
             raise asyncio.CancelledError()
-        tracker.set_estado(track_id, Estado.CONVIRTIENDO)
+
+        tracker.set_estado(
+            track_id,
+            Estado.CONVIRTIENDO
+        )
 
     proceso = await asyncio.create_subprocess_exec(
         "ffmpeg",
         "-i",
         origen,
-        "-map",
-        "0",
-        "-c",
-        "copy",
+
+        "-map", "0:v",
+        "-map", "0:a?",
+        
+        "-c:v", "copy",
+        "-c:a", "copy",
+
         destino,
         "-y",
+
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE
     )
 
     _, error = await proceso.communicate()
 
-    if track_id is not None and tracker.esta_cancelado(track_id):
+    if (
+        track_id is not None and
+        tracker.esta_cancelado(track_id)
+    ):
         raise asyncio.CancelledError()
 
     if proceso.returncode == 0:
+
         try:
             os.remove(origen)
         except OSError:
             pass
+
         return True, ""
 
-    return False, error.decode(errors="ignore")
+    return False, error.decode(
+        errors="ignore"
+    )

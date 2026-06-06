@@ -130,7 +130,7 @@ async def descargar_pelicula(
         tracker.fallar(track_id, "error ffmpeg")
         await bot.send_message(
             chat_id,
-            f"❌ Error convirtiendo\n{titulo}\n\n{error[:3000]}"
+            f"❌ Error convirtiendo\n{titulo}\n\n{error[-3000:]}"
         )
         return False
 
