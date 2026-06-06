@@ -127,6 +127,93 @@ Deberías ver:
 
 Abre Telegram, busca tu bot y envía `/start`.
 
+## Instalación con Docker
+
+Alternativa recomendada para dejar el bot corriendo siempre en un servidor Linux. Incluye Python, ffmpeg y dependencias en la imagen.
+
+### Requisitos
+
+- [Docker](https://docs.docker.com/get-docker/) y Docker Compose v2
+- Archivos `.env` y `user_session.session` (genera la sesión con `python login.py` en tu PC o en el servidor)
+
+### 1. Clonar y preparar
+
+```bash
+git clone https://github.com/RamonRVexe/mediaBot.git
+cd mediaBot
+cp .env.example .env
+```
+
+Edita `.env`. **Dentro del contenedor** las rutas de medios son fijas:
+
+```env
+TV_PATH=/media/TV Shows
+MOVIES_PATH=/media/Movies
+```
+
+Copia `user_session.session` al directorio del proyecto si ya lo generaste en otro equipo.
+
+### 2. Crear carpetas de medios en el servidor
+
+```bash
+sudo mkdir -p "/DATA/Media/TV Shows"
+sudo mkdir -p "/DATA/Media/Movies"
+sudo chown -R $USER:$USER "/DATA/Media"
+```
+
+Si tus rutas son distintas, edita la parte izquierda de los volúmenes en `docker-compose.yml`:
+
+```yaml
+volumes:
+  - .:/app
+  - /DATA/Media/TV Shows:/media/TV Shows   # ruta real en el host
+  - /DATA/Media/Movies:/media/Movies       # ruta real en el host
+```
+
+La parte derecha (`/media/...`) debe coincidir con `TV_PATH` y `MOVIES_PATH` del `.env`.
+
+### 3. Arrancar
+
+```bash
+docker compose up -d --build
+```
+
+La primera vez construye la imagen (1–3 min). Deberías ver en los logs:
+
+```bash
+docker compose logs -f
+```
+
+```
+✅ ffmpeg disponible
+🤖 Bot iniciado...
+```
+
+### Comandos útiles
+
+| Acción | Comando |
+|--------|---------|
+| Ver logs | `docker compose logs -f` |
+| Reiniciar | `docker compose restart` |
+| Parar | `docker compose down` |
+| Actualizar tras cambios | `docker compose up -d --build` |
+
+Con `restart: unless-stopped` el contenedor vuelve a arrancar solo si reinicias el servidor.
+
+### Actualizar el bot
+
+```bash
+cd mediaBot
+git pull   # o copia los archivos nuevos
+docker compose up -d --build
+```
+
+No borres `.env`, `user_session.session` ni `media.db` al actualizar.
+
+### CasaOS
+
+También puedes importar el `docker-compose.yml` desde **App Store → Install a customized app → Import**. Asegúrate de que el proyecto (con `.env` y `user_session.session`) esté en la carpeta montada como `.:/app` — por ejemplo `/DATA/AppData/mediabot`.
+
 ## Comandos
 
 ### Series
@@ -218,6 +305,9 @@ mediaBot/
 │   ├── tmdb.py            # Metadatos TMDB para renombrar
 │   └── utils.py           # ffmpeg, progreso, reanudación
 ├── requirements.txt
+├── Dockerfile             # Imagen Docker (Python + ffmpeg)
+├── docker-compose.yml     # Despliegue en servidor o CasaOS
+├── .dockerignore
 ├── .env.example
 └── .gitignore
 ```
@@ -261,6 +351,13 @@ Borra `user_session.session` y vuelve a ejecutar `python login.py`.
 ### Descarga lenta o flood de Telegram
 
 Telegram limita la velocidad de descarga. El bot incluye pausas entre archivos para evitar bloqueos.
+
+### Docker: el contenedor no arranca
+
+- Revisa los logs: `docker compose logs`
+- Comprueba que `user_session.session` existe en la carpeta del proyecto (no subas solo la carpeta `.git` ni `venv`)
+- Verifica que `TV_PATH` y `MOVIES_PATH` en `.env` usan las rutas del contenedor (`/media/...`), no las del host
+- Asegúrate de que solo hay **una instancia** del bot (evita `database is locked`)
 
 ## Ejecutar en segundo plano (Linux)
 

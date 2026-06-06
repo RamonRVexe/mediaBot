@@ -1,0 +1,13 @@
+name: mediabot
+
+services:
+  mediabot:
+    build: .
+    container_name: mediabot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+      - /DATA/Media/TV Shows:/media/TV Shows
+      - /DATA/Media/Movies:/media/Movies
