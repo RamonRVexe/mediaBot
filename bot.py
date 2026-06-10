@@ -84,7 +84,12 @@ def solo_admin(handler):
     @wraps(handler)
     async def wrapper(update: Update, context):
         user = update.effective_user
-        if not user or not autorizado(user.id):
+        if not user:
+            return ConversationHandler.END
+        if not autorizado(user.id):
+            await update.message.reply_text(
+                "🔒 No autorizado. Solo el admin puede usar este bot."
+            )
             return ConversationHandler.END
         return await handler(update, context)
     return wrapper
@@ -817,7 +822,7 @@ async def callback_query(update: Update, context):
             query.message.chat_id,
             context
         )
-        await query.answer("Encolada" if ok else "Nombre requerido")
+        await query.answer("Encolada" if ok else "Nombre requerido", show_alert=False)
         await query.message.reply_text(msg)
         return
 

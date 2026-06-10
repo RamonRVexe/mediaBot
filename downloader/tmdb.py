@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import re
+import socket
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -82,15 +83,23 @@ def _buscar_tmdb(endpoint, query, anio=None, campo_anio="year"):
         try:
             with urllib.request.urlopen(req, timeout=15) as resp:
                 data = json.loads(resp.read().decode())
-        except urllib.error.HTTPError as e:
-            cuerpo = e.read().decode(errors="ignore")[:200]
-            log.warning(
-                "TMDB HTTP %s en %s para '%s': %s",
-                e.code,
-                endpoint,
-                query,
-                cuerpo
-            )
+        except (urllib.error.HTTPError, urllib.error.URLError, socket.timeout) as e:
+            if isinstance(e, urllib.error.HTTPError):
+                cuerpo = e.read().decode(errors="ignore")[:200]
+                log.warning(
+                    "TMDB HTTP %s en %s para '%s': %s",
+                    e.code,
+                    endpoint,
+                    query,
+                    cuerpo
+                )
+            else:
+                log.warning(
+                    "TMDB error de conexión en %s para '%s': %s",
+                    endpoint,
+                    query,
+                    str(e)
+                )
             raise
 
         results = data.get("results", [])
