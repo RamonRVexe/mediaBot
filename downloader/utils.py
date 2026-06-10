@@ -181,17 +181,6 @@ async def convertir_a_mkv(origen, destino, track_id=None):
             Estado.CONVIRTIENDO
         )
 
-async def convertir_a_mkv(origen, destino, track_id=None):
-
-    if track_id is not None:
-        if tracker.esta_cancelado(track_id):
-            raise asyncio.CancelledError()
-
-        tracker.set_estado(
-            track_id,
-            Estado.CONVIRTIENDO
-        )
-
     # =====================================
     # INTENTO 1
     # Video + Audio + Subtítulos

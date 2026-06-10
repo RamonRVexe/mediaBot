@@ -84,7 +84,12 @@ def solo_admin(handler):
     @wraps(handler)
     async def wrapper(update: Update, context):
         user = update.effective_user
-        if not user or not autorizado(user.id):
+        if not user:
+            return ConversationHandler.END
+        if not autorizado(user.id):
+            await update.message.reply_text(
+                "🔒 No autorizado. Solo el admin puede usar este bot."
+            )
             return ConversationHandler.END
         return await handler(update, context)
     return wrapper
@@ -472,7 +477,41 @@ async def confirm_serie(update: Update, context):
         f"📺 Carpeta: {titulo}\n\n🔍 Buscando temporadas..."
     )
 
-    return await continuar_temporadas(update, context)
+    grupo = context.user_data.get("grupo")
+    if not grupo:
+        await update.message.reply_text("❌ Error: no hay grupo seleccionado")
+        return ConversationHandler.END
+
+    temps = await obtener_temporadas(telethon_client, grupo)
+
+    if not temps:
+        await update.message.reply_text(
+            "❌ No encontré episodios en ese grupo."
+        )
+        return ConversationHandler.END
+
+    context.user_data["temps"] = temps
+
+    texto_temps = (
+        f"📺 Serie: {titulo}\n\n"
+        "Temporadas encontradas\n\n"
+    )
+
+    for t in temps:
+        texto_temps += f"{t}. Season {t:02d}\n"
+
+    texto_temps += """
+
+A = Todas
+
+E:1,2
+Excluir temporadas
+
+1,3
+Sólo descargar esas"""
+
+    await update.message.reply_text(texto_temps)
+    return TEMP
 
 
 @solo_admin
@@ -817,7 +856,7 @@ async def callback_query(update: Update, context):
             query.message.chat_id,
             context
         )
-        await query.answer("Encolada" if ok else "Nombre requerido")
+        await query.answer("Encolada" if ok else "Nombre requerido", show_alert=False)
         await query.message.reply_text(msg)
         return
 
@@ -908,10 +947,6 @@ app.add_handler(CommandHandler("download", download))
 app.add_handler(CommandHandler("downloads", downloads))
 app.add_handler(CommandHandler("cancel_download", cancel_download))
 app.add_handler(CallbackQueryHandler(callback_query))
-app.add_handler(MessageHandler(
-    filters.TEXT & ~filters.COMMAND,
-    recibir_nombre_pelicula
-))
 
 series_conv = ConversationHandler(
     entry_points=[
@@ -967,6 +1002,10 @@ movies_conv = ConversationHandler(
 
 app.add_handler(series_conv)
 app.add_handler(movies_conv)
+app.add_handler(MessageHandler(
+    filters.TEXT & ~filters.COMMAND,
+    recibir_nombre_pelicula
+))
 
 print("🤖 Bot iniciado...")
 app.run_polling()
