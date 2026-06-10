@@ -21,11 +21,12 @@ def limpiar_nombre(nombre):
         return ""
     nombre = nombre.strip()
     nombre = re.sub(
-        r"[^\w\s\.\-\[\]\(\)]",
+        r"[^\w\s\.\-\[\]\(\)×xX]",
         "",
         nombre,
         flags=re.UNICODE
     )
+    nombre = re.sub(r"\s+", " ", nombre)
     return nombre
 
 

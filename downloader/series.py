@@ -15,6 +15,10 @@ from downloader.utils import (
 )
 
 PATTERNS = {
+    "S_EP_DOTS": re.compile(
+        r"S(\d{1,2})[\.\-_\s]*EP(\d{1,3})",
+        re.I
+    ),
     "S_EP": re.compile(
         r"S(\d{1,2})[.\-_ ]?EP(\d{1,3})",
         re.I
@@ -35,16 +39,24 @@ PATTERNS = {
         r"T\s*(\d{1,2})\s*[:\-]?\s*E\s*(\d{1,3})",
         re.I
     ),
-    "1x01": re.compile(
-        r"(\d{1,2})\s*[xX×]\s*(\d{1,3})",
+    "TemporadaDash": re.compile(
+        r"Temporada\s*(\d+)\s*[\-–—]\s*(?:Cap|Capitulo|EP|Episodio)\s*(\d+)",
         re.I
     ),
     "TempCap": re.compile(
-        r"Temp(?:orada)?\s*(\d+).*?Cap(?:itulo)?\s*(\d+)",
+        r"Temp(?:orada)?\s*(\d+)\s*[\-–—]?\s*Cap(?:itulo)?\s*(\d+)",
         re.I
     ),
     "Temporada": re.compile(
         r"Temporada\s*(\d+).*?Episodio\s*(\d+)",
+        re.I
+    ),
+    "1x01_strict": re.compile(
+        r"\b(\d{1,2})\s*[xX×]\s*(\d{1,3})\b",
+        re.I
+    ),
+    "1x01": re.compile(
+        r"(\d{1,2})\s*[xX×]\s*(\d{1,3})",
         re.I
     ),
     "EP_T": re.compile(
