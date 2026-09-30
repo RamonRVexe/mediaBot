@@ -26,13 +26,22 @@ class MovieDownloadQueue:
             maxsize=MAX_DOWNLOAD_QUEUE
         )
         self._iniciado = False
+        self._workers = []
 
     def iniciar(self):
         if self._iniciado:
             return
         self._iniciado = True
         for _ in range(MAX_CONCURRENT_DOWNLOADS):
-            asyncio.create_task(self._worker())
+            self._workers.append(asyncio.create_task(self._worker()))
+
+    async def detener(self):
+        for worker in self._workers:
+            worker.cancel()
+        if self._workers:
+            await asyncio.gather(*self._workers, return_exceptions=True)
+        self._workers.clear()
+        self._iniciado = False
 
     @property
     def tamano(self):

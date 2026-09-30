@@ -253,10 +253,14 @@ En `/list` y `/search` cada película tiene un botón **⬇** para encolarla al 
 /cancel_download 5          → cancelar la descarga #5
 /cancel_download serie Nombre → cancelar descarga de una serie
 /status                     → estado del bot
+/restart                    → reiniciar el bot (solo admin)
+/stop                       → detener el bot (solo admin)
 /groups                     → listar tus chats/grupos
 /paths                      → rutas configuradas
 /cancel                     → cancelar conversación activa
 ```
+
+`/stop` deja el bot detenido hasta que reinicies el proceso o el contenedor. Para Docker, puedes usar `docker compose restart` para volver a iniciarlo.
 
 ### Reanudar descargas interrumpidas
 

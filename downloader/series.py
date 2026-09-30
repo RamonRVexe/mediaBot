@@ -65,8 +65,11 @@ PATTERNS = {
     )
 }
 
+EPISODIO_SOLO = re.compile(r"\bEpisodio\s*(\d+)\b", re.I)
+TEMPORADA_TEMA = re.compile(r"\bTemporada\s*(\d+)\b", re.I)
 
-def parse_episode(texto):
+
+def parse_episode(texto, temporada=None):
     if not texto:
         return None
 
@@ -86,18 +89,55 @@ def parse_episode(texto):
 
         return season, episode, patron
 
+    match = EPISODIO_SOLO.search(texto)
+    if match and temporada is not None:
+        return temporada, int(match.group(1)), "Episodio"
+
     return None
+
+
+def _registrar_temporada_tema(msg, temporadas_tema):
+    action = getattr(msg, "action", None)
+    titulo = getattr(action, "title", "")
+    match = TEMPORADA_TEMA.search(limpiar_nombre(titulo))
+    if match:
+        temporadas_tema[msg.id] = int(match.group(1))
+
+
+def _temporada_del_tema(msg, temporadas_tema):
+    reply_to = getattr(msg, "reply_to", None)
+    topic_id = getattr(reply_to, "reply_to_top_id", None)
+    if not topic_id:
+        topic_id = getattr(reply_to, "reply_to_msg_id", None)
+    return temporadas_tema.get(topic_id)
+
+
+def _parsear_mensaje_episodio(msg, temporadas_tema):
+    temporada = _temporada_del_tema(msg, temporadas_tema)
+    nombre = limpiar_nombre(msg.file.name or "")
+    parsed = parse_episode(nombre)
+    if parsed:
+        return parsed, nombre
+
+    parsed = parse_episode(nombre, temporada=temporada)
+    if parsed:
+        return parsed, nombre
+
+    texto = limpiar_nombre(getattr(msg, "message", "") or "")
+    parsed = parse_episode(texto, temporada=temporada)
+    return parsed, nombre or texto
 
 
 async def obtener_temporadas(telethon_client, grupo):
     temporadas = set()
+    temporadas_tema = {}
 
-    async for msg in telethon_client.iter_messages(grupo):
+    async for msg in telethon_client.iter_messages(grupo, reverse=True):
+        _registrar_temporada_tema(msg, temporadas_tema)
         if not msg.file:
             continue
 
-        nombre = limpiar_nombre(msg.file.name or "")
-        parsed = parse_episode(nombre)
+        parsed, _ = _parsear_mensaje_episodio(msg, temporadas_tema)
 
         if parsed:
             season, _, _ = parsed
@@ -116,6 +156,7 @@ async def descargar_serie(
 ):
     patrones_encontrados = set()
     cola = []
+    temporadas_tema = {}
 
     await bot.send_message(
         chat_id,
@@ -123,11 +164,14 @@ async def descargar_serie(
     )
 
     async for msg in telethon_client.iter_messages(grupo, reverse=True):
+        _registrar_temporada_tema(msg, temporadas_tema)
         if not msg.file:
             continue
 
-        original = limpiar_nombre(msg.file.name or "")
-        parsed = parse_episode(original)
+        parsed, original = _parsear_mensaje_episodio(
+            msg,
+            temporadas_tema
+        )
 
         if not parsed:
             continue
