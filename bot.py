@@ -1,5 +1,9 @@
 import asyncio
 import logging
+import os
+import subprocess
+import sys
+import threading
 from functools import wraps
 
 from telegram import (
@@ -69,6 +73,8 @@ telethon_client = TelegramClient(
     API_ID,
     API_HASH
 )
+reiniciar_solicitado = False
+detener_solicitado = False
 
 
 async def iniciar_telethon():
@@ -107,6 +113,12 @@ async def post_init(application):
         print("✅ TMDB configurado")
     else:
         print("⚠️ TMDB no configurado (TMDB_API_KEY o TMDB_READ_TOKEN)")
+
+
+async def post_shutdown(application):
+    await movie_queue.detener()
+    if telethon_client.is_connected():
+        await telethon_client.disconnect()
 
 
 def formatear_peliculas(resultados, titulo, pagina=None, total=None):
@@ -926,6 +938,24 @@ async def cancel(update: Update, context):
     return ConversationHandler.END
 
 
+@solo_admin
+async def restart_bot(update: Update, context):
+    global reiniciar_solicitado
+    reiniciar_solicitado = True
+    await update.message.reply_text("🔄 Reiniciando el bot...")
+    context.application.stop_running()
+
+
+@solo_admin
+async def stop_bot(update: Update, context):
+    global detener_solicitado
+    detener_solicitado = True
+    await update.message.reply_text(
+        "⏹ Bot detenido. Para iniciarlo, reinicia el proceso."
+    )
+    context.application.stop_running()
+
+
 # =====================================
 # APP
 # =====================================
@@ -934,10 +964,13 @@ app = (
     ApplicationBuilder()
     .token(BOT_TOKEN)
     .post_init(post_init)
+    .post_shutdown(post_shutdown)
     .build()
 )
 
 app.add_handler(CommandHandler("start", start))
+app.add_handler(CommandHandler("restart", restart_bot))
+app.add_handler(CommandHandler("stop", stop_bot))
 app.add_handler(CommandHandler("status", status))
 app.add_handler(CommandHandler("groups", groups))
 app.add_handler(CommandHandler("paths", paths))
@@ -1009,3 +1042,12 @@ app.add_handler(MessageHandler(
 
 print("🤖 Bot iniciado...")
 app.run_polling()
+
+if reiniciar_solicitado:
+    comando = [sys.executable, *sys.argv]
+    if os.name == "nt":
+        subprocess.Popen(comando)
+    else:
+        os.execv(sys.executable, comando)
+elif detener_solicitado:
+    threading.Event().wait()
